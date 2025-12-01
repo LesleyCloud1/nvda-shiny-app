@@ -1,2 +1,4 @@
 /slides/
-/Archive/
+/Archive/__pycache__/
+*.pyc
+.venv/
