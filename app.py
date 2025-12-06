@@ -9,9 +9,15 @@ import shinyswatch
 import matplotlib.pyplot as plt
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_absolute_error, mean_squared_error
+from sklearn.preprocessing import MinMaxScaler
 import numpy as np
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Dropout
 
-API_KEY = "d4mdr39r01qjidhv7qa0d4mdr39r01qjidhv7qag"  # TODO: Replace with your Finnhub API key
+
+API_KEY = "d4mdr39r01qjidhv7qa0d4mdr39r01qjidhv7qag"
 finnhub_client = finnhub.Client(api_key=API_KEY)
 
 
@@ -41,13 +47,13 @@ def get_news():
     return news
 
 
-news = get_news()  # Retrieve News with Finnhub API
+news = get_news()
 
 
 def get_dataframe():
     ticker = "NVDA"
-    start_date = "2000-01-01"  # IPO Date.
-    end_date = "2050-12-31"  # Future Date :)
+    start_date = "2000-01-01"
+    end_date = "2050-12-31"
     df = yf.download(ticker, start=start_date, end=end_date)
     df.columns = ["_".join(col) for col in df.columns]
     df["Date"] = df.index
@@ -55,20 +61,18 @@ def get_dataframe():
 
     column_names = ["Date", "Close", "High", "Low", "Open", "Volume"]
     rename_map = {
-        "Date": "Date",  # Map old column names to new names
+        "Date": "Date",
         "Close_NVDA": "Close",
         "High_NVDA": "High",
         "Low_NVDA": "Low",
         "Open_NVDA": "Open",
         "Volume_NVDA": "Volume",
     }
-    df = df.rename(columns=rename_map)[column_names]  # Rename and reorder columns
+    df = df.rename(columns=rename_map)[column_names]
 
-    # Keep numeric for modeling
     columns_to_round = {"Close": 3, "High": 3, "Low": 3, "Open": 3}
     df = df.round(columns_to_round)
 
-    # Sort oldest -> newest for time series work
     df = df.sort_values(by="Date", ascending=True)
     df["Date"] = df["Date"].dt.date
 
@@ -83,6 +87,7 @@ def get_dataframe():
 df = get_dataframe()
 
 
+# ========== LINEAR REGRESSION FUNCTIONS ==========
 def predict_next_close(dataframe: pd.DataFrame) -> float:
     data = dataframe.copy().sort_values("Date")
     data["Close_lag1"] = data["Close"].shift(1)
@@ -106,7 +111,6 @@ def predict_next_close(dataframe: pd.DataFrame) -> float:
 
 
 def predict_next_high(dataframe: pd.DataFrame) -> float:
-    # Predict tomorrow's high using lagged highs and closes
     data = dataframe.copy().sort_values("Date")
     data["High_lag1"] = data["High"].shift(1)
     data["High_lag2"] = data["High"].shift(2)
@@ -131,7 +135,6 @@ def predict_next_high(dataframe: pd.DataFrame) -> float:
 
 
 def predict_next_low(dataframe: pd.DataFrame) -> float:
-    # Predict tomorrow's low using lagged lows and closes
     data = dataframe.copy().sort_values("Date")
     data["Low_lag1"] = data["Low"].shift(1)
     data["Low_lag2"] = data["Low"].shift(2)
@@ -156,17 +159,11 @@ def predict_next_low(dataframe: pd.DataFrame) -> float:
 
 
 def backtest_close_model(dataframe: pd.DataFrame, lookback_days: int = 250):
-    """
-    Walk-forward backtest for close price:
-    For each day in the last `lookback_days`, fit on all prior data,
-    predict that day's close, and compare to actual.
-    """
     data = dataframe.copy().sort_values("Date").reset_index(drop=True)
 
     preds = []
     actuals = []
 
-    # start index so we always have at least 3 prior points for training
     start_idx = max(3, len(data) - lookback_days)
 
     for i in range(start_idx, len(data)):
@@ -185,7 +182,6 @@ def backtest_close_model(dataframe: pd.DataFrame, lookback_days: int = 250):
         model = LinearRegression()
         model.fit(X_train, y_train)
 
-        # predict for day i using its lags
         row = data.iloc[i]
         lag1 = data.iloc[i - 1]["Close"]
         lag2 = data.iloc[i - 2]["Close"]
@@ -199,29 +195,159 @@ def backtest_close_model(dataframe: pd.DataFrame, lookback_days: int = 250):
     if len(actuals) == 0:
         return float("nan"), float("nan")
 
-    # MAE directly
     mae = mean_absolute_error(actuals, preds)
-
-    # RMSE manually (no squared= argument)
     mse = mean_squared_error(actuals, preds)
     rmse = mse ** 0.5
 
     return mae, rmse
 
 
-# Global predictions + backtest metrics
-predicted_next_close = predict_next_close(df)
-predicted_next_high = predict_next_high(df)
-predicted_next_low = predict_next_low(df)
-mae_close, rmse_close = backtest_close_model(df, lookback_days=250)
-
-print("PREDICTED_NEXT_CLOSE:", predicted_next_close)
-print("PREDICTED_NEXT_HIGH:", predicted_next_high)
-print("PREDICTED_NEXT_LOW:", predicted_next_low)
-print("BACKTEST MAE (close):", mae_close)
-print("BACKTEST RMSE (close):", rmse_close)
+# ========== LSTM FUNCTIONS ==========
+def create_lstm_dataset(data, lookback=60):
+    """Create sequences for LSTM training"""
+    X, y = [], []
+    for i in range(lookback, len(data)):
+        X.append(data[i-lookback:i, 0])
+        y.append(data[i, 0])
+    return np.array(X), np.array(y)
 
 
+def build_lstm_model(lookback=60):
+    """Build LSTM model architecture"""
+    model = Sequential([
+        LSTM(50, return_sequences=True, input_shape=(lookback, 1)),
+        Dropout(0.2),
+        LSTM(50, return_sequences=False),
+        Dropout(0.2),
+        Dense(25),
+        Dense(1)
+    ])
+    model.compile(optimizer='adam', loss='mean_squared_error')
+    return model
+
+
+def predict_next_close_lstm(dataframe: pd.DataFrame, lookback=60) -> float:
+    """Predict next close price using LSTM"""
+    try:
+        print("Training LSTM for next-day prediction...")
+        data = dataframe.copy().sort_values("Date")
+        close_prices = data['Close'].values.reshape(-1, 1)
+        
+        # Scale the data
+        scaler = MinMaxScaler(feature_range=(0, 1))
+        scaled_data = scaler.fit_transform(close_prices)
+        
+        # Create training data
+        X_train, y_train = create_lstm_dataset(scaled_data, lookback)
+        X_train = X_train.reshape(X_train.shape[0], X_train.shape[1], 1)
+        
+        # Build and train model
+        model = build_lstm_model(lookback)
+        model.fit(X_train, y_train, batch_size=32, epochs=10, verbose=0)
+        
+        # Predict next day
+        last_sequence = scaled_data[-lookback:]
+        last_sequence = last_sequence.reshape(1, lookback, 1)
+        
+        prediction_scaled = model.predict(last_sequence, verbose=0)
+        prediction = scaler.inverse_transform(prediction_scaled)
+        
+        print("LSTM next-day prediction complete!")
+        return round(float(prediction[0][0]), 3)
+    except Exception as e:
+        print(f"LSTM prediction error: {e}")
+        return float("nan")
+
+
+def backtest_lstm_model(dataframe: pd.DataFrame, lookback=60, test_days=10):
+    """Backtest LSTM model on recent data"""
+    try:
+        print(f"Starting LSTM backtest on last {test_days} days...")
+        data = dataframe.copy().sort_values("Date").reset_index(drop=True)
+        close_prices = data['Close'].values.reshape(-1, 1)
+        
+        scaler = MinMaxScaler(feature_range=(0, 1))
+        scaled_data = scaler.fit_transform(close_prices)
+        
+        preds = []
+        actuals = []
+        
+        # Start from enough data for training
+        start_idx = max(lookback + 100, len(data) - test_days)
+        
+        for idx, i in enumerate(range(start_idx, len(data))):
+            print(f"  Processing day {idx+1}/{test_days}...")
+            # Use all data up to day i for training
+            train_data = scaled_data[:i]
+            
+            if len(train_data) < lookback + 10:
+                continue
+                
+            X_train, y_train = create_lstm_dataset(train_data, lookback)
+            X_train = X_train.reshape(X_train.shape[0], X_train.shape[1], 1)
+            
+            # Build and train model
+            model = build_lstm_model(lookback)
+            model.fit(X_train, y_train, batch_size=32, epochs=5, verbose=0)
+            
+            # Predict day i
+            last_sequence = train_data[-lookback:]
+            last_sequence = last_sequence.reshape(1, lookback, 1)
+            
+            pred_scaled = model.predict(last_sequence, verbose=0)
+            pred = scaler.inverse_transform(pred_scaled)
+            
+            preds.append(float(pred[0][0]))
+            actuals.append(data.iloc[i]['Close'])
+        
+        if len(actuals) == 0:
+            return float("nan"), float("nan")
+        
+        mae = mean_absolute_error(actuals, preds)
+        mse = mean_squared_error(actuals, preds)
+        rmse = mse ** 0.5
+        
+        print("LSTM backtest complete!")
+        return mae, rmse
+    except Exception as e:
+        print(f"LSTM backtest error: {e}")
+        return float("nan"), float("nan")
+
+
+# ========== CALCULATE ALL PREDICTIONS ==========
+print("\n" + "="*50)
+print("Calculating Linear Regression predictions...")
+print("="*50)
+predicted_next_close_lr = predict_next_close(df)
+predicted_next_high_lr = predict_next_high(df)
+predicted_next_low_lr = predict_next_low(df)
+mae_close_lr, rmse_close_lr = backtest_close_model(df, lookback_days=250)
+
+print("\n" + "="*50)
+print("Calculating LSTM predictions...")
+print("="*50)
+predicted_next_close_lstm = predict_next_close_lstm(df, lookback=60)
+mae_close_lstm, rmse_close_lstm = backtest_lstm_model(df, lookback=60, test_days=10)
+
+print("\n" + "="*50)
+print("=== LINEAR REGRESSION RESULTS ===")
+print("="*50)
+print("PREDICTED_NEXT_CLOSE:", predicted_next_close_lr)
+print("PREDICTED_NEXT_HIGH:", predicted_next_high_lr)
+print("PREDICTED_NEXT_LOW:", predicted_next_low_lr)
+print("BACKTEST MAE:", mae_close_lr)
+print("BACKTEST RMSE:", rmse_close_lr)
+
+print("\n" + "="*50)
+print("=== LSTM RESULTS ===")
+print("="*50)
+print("PREDICTED_NEXT_CLOSE:", predicted_next_close_lstm)
+print("BACKTEST MAE:", mae_close_lstm)
+print("BACKTEST RMSE:", rmse_close_lstm)
+print("="*50 + "\n")
+
+
+# ========== UI ==========
 app_ui = ui.page_fluid(
     ui.row(
         ui.h1(
@@ -245,12 +371,12 @@ app_ui = ui.page_fluid(
         ),
         ui.output_plot("my_plot"),
         ui.h3(
-            "NVDA Next-Day Price Predictions",
+            "NVDA Next-Day Price Predictions - Model Comparison",
             style="text-align: center; margin-top: 20px;",
         ),
         ui.card(
             ui.output_text("next_price_text"),
-            style="text-align: center; font-size: 18px; padding: 10px;",
+            style="text-align: center; font-size: 16px; padding: 10px;",
         ),
         ui.h3(
             "NVDA Data Historical Stock Splits",
@@ -308,7 +434,7 @@ app_ui = ui.page_fluid(
             width: 100%;
             overflow-y: auto;
             display: grid;
-            grid-template-columns: repeat(3, 1fr); /* 3 cards per row */
+            grid-template-columns: repeat(3, 1fr);
             gap: 16px;
             border: 1px solid #ddd;
             border-radius: 8px;
@@ -325,11 +451,13 @@ app_ui = ui.page_fluid(
 )
 
 
+# ========== SERVER ==========
 def server(input, output, session):
     @output
     @render.data_frame
     def my_table():
         display_df = df.copy()
+        display_df = display_df.sort_values(by="Date", ascending=False)
         display_df["Volume"] = display_df["Volume"].apply(lambda x: f"{int(x):,}")
         return display_df
 
@@ -359,76 +487,58 @@ def server(input, output, session):
         last_high = row["High"]
         last_low = row["Low"]
 
-        msg = (
-            f"Last close on {last_date}: ${last_close:.3f} | "
-            f"Last high: ${last_high:.3f} | "
-            f"Last low: ${last_low:.3f}"
-        )
-        if not np.isnan(predicted_next_close):
-            msg += f" | Predicted next close: ${predicted_next_close:.3f}"
+        msg = f"📅 Last close on {last_date}: ${last_close:.3f} | High: ${last_high:.3f} | Low: ${last_low:.3f}\n\n"
+        
+        msg += "🔵 LINEAR REGRESSION MODEL:\n"
+        if not np.isnan(predicted_next_close_lr):
+            msg += f"   • Predicted next close: ${predicted_next_close_lr:.3f}\n"
+            msg += f"   • Predicted next high: ${predicted_next_high_lr:.3f}\n"
+            msg += f"   • Predicted next low: ${predicted_next_low_lr:.3f}\n"
         else:
-            msg += " | Predicted next close: N/A"
-
-        if not np.isnan(predicted_next_high):
-            msg += f" | Predicted next high: ${predicted_next_high:.3f}"
+            msg += "   • N/A\n"
+        
+        if not np.isnan(mae_close_lr):
+            msg += f"   • Backtest (250 days) - MAE: ${mae_close_lr:.3f}, RMSE: ${rmse_close_lr:.3f}\n\n"
+        
+        msg += "🟢 LSTM MODEL (Deep Learning):\n"
+        if not np.isnan(predicted_next_close_lstm):
+            msg += f"   • Predicted next close: ${predicted_next_close_lstm:.3f}\n"
         else:
-            msg += " | Predicted next high: N/A"
-
-        if not np.isnan(predicted_next_low):
-            msg += f" | Predicted next low: ${predicted_next_low:.3f}"
+            msg += "   • N/A\n"
+            
+        if not np.isnan(mae_close_lstm):
+            msg += f"   • Backtest (10 days) - MAE: ${mae_close_lstm:.3f}, RMSE: ${rmse_close_lstm:.3f}\n"
         else:
-            msg += " | Predicted next low: N/A"
-
-        if not np.isnan(mae_close) and not np.isnan(rmse_close):
-            msg += (
-                f" || Backtest (last 250 days) MAE: ${mae_close:.3f}, "
-                f"RMSE: ${rmse_close:.3f}"
-            )
-        else:
-            msg += " || Backtest metrics not available."
+            msg += "   • Backtest in progress...\n"
 
         return msg
 
     @shiny.render.plot
     def my_plot():
-        fig, ax = plt.subplots()
+        fig, ax = plt.subplots(figsize=(12, 6))
 
-        # Historical close prices
-        ax.plot(df["Date"], df["Close"], label="Close Price", color="blue", linewidth=2)
+        ax.plot(df["Date"], df["Close"], label="Historical Close Price", color="blue", linewidth=2)
 
-        # Predicted next-day close, high, and low
         last_date = df["Date"].max()
         next_date = last_date + timedelta(days=1)
 
-        if not np.isnan(predicted_next_close):
-            ax.scatter(
-                [next_date],
-                [predicted_next_close],
-                color="red",
-                label="Predicted Next Close",
-            )
-            ax.axhline(predicted_next_close, color="red", linestyle="--", alpha=0.4)
+        # Linear Regression predictions
+        if not np.isnan(predicted_next_close_lr):
+            ax.scatter([next_date], [predicted_next_close_lr], color="red", s=100, 
+                      label="LR: Predicted Close", marker='o', zorder=5)
+            ax.scatter([next_date], [predicted_next_high_lr], color="orange", s=100,
+                      label="LR: Predicted High", marker='^', zorder=5)
+            ax.scatter([next_date], [predicted_next_low_lr], color="green", s=100,
+                      label="LR: Predicted Low", marker='v', zorder=5)
 
-        if not np.isnan(predicted_next_high):
-            ax.scatter(
-                [next_date],
-                [predicted_next_high],
-                color="orange",
-                label="Predicted Next High",
-            )
-            ax.axhline(predicted_next_high, color="orange", linestyle="--", alpha=0.4)
-
-        if not np.isnan(predicted_next_low):
-            ax.scatter(
-                [next_date],
-                [predicted_next_low],
-                color="green",
-                label="Predicted Next Low",
-            )
-            ax.axhline(predicted_next_low, color="green", linestyle="--", alpha=0.4)
+        # LSTM prediction
+        if not np.isnan(predicted_next_close_lstm):
+            ax.scatter([next_date], [predicted_next_close_lstm], color="purple", s=150,
+                      label="LSTM: Predicted Close", marker='*', zorder=6)
 
         ax.set_xlabel("Date", fontsize=12)
         ax.set_ylabel("Price (USD)", fontsize=12)
+        ax.set_title("NVDA Stock Price: Historical + Predictions", fontsize=14)
         ax.grid(True, linestyle="--", alpha=0.7)
         ax.legend(loc="upper left")
         fig.tight_layout()
