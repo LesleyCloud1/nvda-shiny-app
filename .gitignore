@@ -2,3 +2,8 @@
 /Archive/__pycache__/
 *.pyc
 .venv/
+
+# Local configuration
+.env
+.env.*
+!.env.example

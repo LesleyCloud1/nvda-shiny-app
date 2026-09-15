@@ -1,4 +1,5 @@
 #shiny run --reload app.py
+import os
 from shiny import App, render, ui
 import pandas as pd
 import shiny
@@ -17,7 +18,7 @@ from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Dropout
 
 
-API_KEY = "d4mdr39r01qjidhv7qa0d4mdr39r01qjidhv7qag"
+API_KEY = os.environ["FINNHUB_API_KEY"]
 finnhub_client = finnhub.Client(api_key=API_KEY)
 
 
@@ -266,8 +267,6 @@ def backtest_lstm_model(dataframe: pd.DataFrame, lookback=60, test_days=10):
         data = dataframe.copy().sort_values("Date").reset_index(drop=True)
         close_prices = data['Close'].values.reshape(-1, 1)
         
-        scaler = MinMaxScaler(feature_range=(0, 1))
-        scaled_data = scaler.fit_transform(close_prices)
         
         preds = []
         actuals = []
@@ -278,7 +277,8 @@ def backtest_lstm_model(dataframe: pd.DataFrame, lookback=60, test_days=10):
         for idx, i in enumerate(range(start_idx, len(data))):
             print(f"  Processing day {idx+1}/{test_days}...")
             # Use all data up to day i for training
-            train_data = scaled_data[:i]
+            scaler = MinMaxScaler(feature_range=(0, 1))
+            train_data = scaler.fit_transform(close_prices[:i])
             
             if len(train_data) < lookback + 10:
                 continue
